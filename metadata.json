@@ -1,0 +1,5 @@
+{
+  "name": "Roshambo Live",
+  "description": "A real-time, peer-to-peer Rock Paper Scissors game featuring a slot-machine selection interface and AI-powered commentary.",
+  "requestFramePermissions": []
+}
