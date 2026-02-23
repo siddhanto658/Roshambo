@@ -1,36 +1,66 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameState, Move, PeerMessage, PlayerRole, Score } from './types';
 import { SlotMachine } from './components/SlotMachine';
 import { generateCommentary } from './services/geminiService';
-import { Copy, Users, Play, Radio, Trophy, Zap } from 'lucide-react';
+import { Copy, Users, Play, Trophy, Zap, Clock, CheckCircle, Circle } from 'lucide-react';
 
-// Access global Peer
 declare const Peer: any;
+
+const generateRoomCode = () => {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+};
 
 export default function App() {
   const [peerId, setPeerId] = useState<string>('');
-  const [targetPeerId, setTargetPeerId] = useState<string>('');
+  const [roomCode, setRoomCode] = useState<string>('');
+  const [targetRoomCode, setTargetRoomCode] = useState<string>('');
   const [gameState, setGameState] = useState<GameState>(GameState.LOBBY);
   const [role, setRole] = useState<PlayerRole | null>(null);
   
-  // Game Logic State
   const [myMove, setMyMove] = useState<Move | null>(null);
   const [opponentMove, setOpponentMove] = useState<Move | null>(null);
+  const [opponentHasSelected, setOpponentHasSelected] = useState(false);
   const [score, setScore] = useState<Score>({ me: 0, opponent: 0 });
   const [commentary, setCommentary] = useState<string>('');
   const [isProcessingAI, setIsProcessingAI] = useState(false);
   const [gameResult, setGameResult] = useState<'WIN' | 'LOSE' | 'DRAW' | null>(null);
+  const [timer, setTimer] = useState<number>(20);
 
-  // Refs for PeerJS
   const peerRef = useRef<any>(null);
   const connRef = useRef<any>(null);
+  const timerRef = useRef<number | null>(null);
 
-  // Initialize PeerJS on mount
+  const startTimer = useCallback(() => {
+    setTimer(20);
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = window.setInterval(() => {
+      setTimer(t => {
+        if (t <= 1) {
+          if (timerRef.current) clearInterval(timerRef.current);
+          return 0;
+        }
+        return t - 1;
+      });
+    }, 1000);
+  }, []);
+
+  const stopTimer = useCallback(() => {
+    if (timerRef.current) clearInterval(timerRef.current);
+    timerRef.current = null;
+  }, []);
+
   useEffect(() => {
-    const newPeer = new Peer();
+    const code = generateRoomCode();
+    setRoomCode(code);
+    const newPeer = new Peer(`roshambo-${code}`);
     
-    newPeer.on('open', (id: string) => {
-      setPeerId(id);
+    newPeer.on('open', () => {
+      setPeerId(code);
     });
 
     newPeer.on('connection', (conn: any) => {
@@ -38,14 +68,19 @@ export default function App() {
       setupConnectionHandlers(conn);
       setRole(PlayerRole.HOST);
       setGameState(GameState.PLAYING);
+      setMyMove(null);
+      setOpponentMove(null);
+      setOpponentHasSelected(false);
+      startTimer();
     });
 
     peerRef.current = newPeer;
 
     return () => {
       newPeer.destroy();
+      stopTimer();
     };
-  }, []);
+  }, [startTimer, stopTimer]);
 
   const setupConnectionHandlers = (conn: any) => {
     conn.on('data', (data: PeerMessage) => {
@@ -62,8 +97,8 @@ export default function App() {
     });
     
     conn.on('error', () => {
-       alert('Connection error');
-       resetGame();
+      alert('Connection error');
+      resetGame();
     });
   };
 
@@ -72,26 +107,33 @@ export default function App() {
     setRole(null);
     setMyMove(null);
     setOpponentMove(null);
+    setOpponentHasSelected(false);
     setScore({ me: 0, opponent: 0 });
     setGameResult(null);
     setCommentary('');
+    stopTimer();
   };
 
   const joinGame = () => {
-    if (!targetPeerId || !peerRef.current) return;
-    const conn = peerRef.current.connect(targetPeerId);
+    if (!targetRoomCode || !peerRef.current) return;
+    const conn = peerRef.current.connect(`roshambo-${targetRoomCode.toUpperCase()}`);
     connRef.current = conn;
     setupConnectionHandlers(conn);
     setRole(PlayerRole.GUEST);
     setGameState(GameState.PLAYING);
+    setMyMove(null);
+    setOpponentMove(null);
+    setOpponentHasSelected(false);
+    startTimer();
   };
 
   const handleData = (data: PeerMessage) => {
     switch (data.type) {
       case 'MOVE_COMMITTED':
+        setOpponentHasSelected(true);
         setGameState(prev => {
-           if (prev === GameState.LOCKED) return GameState.BOTH_LOCKED;
-           return GameState.OPPONENT_LOCKED;
+          if (prev === GameState.LOCKED) return GameState.BOTH_LOCKED;
+          return GameState.OPPONENT_LOCKED;
         });
         break;
 
@@ -99,34 +141,48 @@ export default function App() {
         const oppMove = data.payload as Move;
         setOpponentMove(oppMove);
         setGameState(GameState.REVEAL);
+        stopTimer();
         break;
 
       case 'PLAY_AGAIN':
         setMyMove(null);
         setOpponentMove(null);
+        setOpponentHasSelected(false);
         setGameResult(null);
         setCommentary('');
         setGameState(GameState.PLAYING);
+        startTimer();
         break;
     }
   };
 
   useEffect(() => {
     if (gameState === GameState.BOTH_LOCKED) {
-       if (connRef.current && myMove) {
-          connRef.current.send({
-            type: 'REVEAL_MOVE',
-            payload: myMove
-          });
-       }
+      if (connRef.current && myMove) {
+        connRef.current.send({
+          type: 'REVEAL_MOVE',
+          payload: myMove
+        });
+      }
+      stopTimer();
     }
-  }, [gameState, myMove]);
+  }, [gameState, myMove, stopTimer]);
 
   useEffect(() => {
     if (gameState === GameState.REVEAL && myMove && opponentMove) {
       determineWinner(myMove, opponentMove);
     }
   }, [gameState, opponentMove]);
+
+  useEffect(() => {
+    if (timer === 0 && gameState === GameState.PLAYING) {
+      if (!myMove) {
+        const moves = [Move.ROCK, Move.PAPER, Move.SCISSORS];
+        const randomMove = moves[Math.floor(Math.random() * moves.length)];
+        handleMySelect(randomMove);
+      }
+    }
+  }, [timer, gameState, myMove]);
 
   const determineWinner = async (me: Move, opp: Move) => {
     let result: 'me' | 'opponent' | 'draw' = 'draw';
@@ -168,29 +224,31 @@ export default function App() {
   const handlePlayAgain = () => {
     setMyMove(null);
     setOpponentMove(null);
+    setOpponentHasSelected(false);
     setGameResult(null);
     setCommentary('');
     setGameState(GameState.PLAYING);
     if (connRef.current) {
       connRef.current.send({ type: 'PLAY_AGAIN' });
     }
+    startTimer();
   };
 
   const copyToClipboard = () => {
-    navigator.clipboard.writeText(peerId);
-    alert("Room ID copied!");
+    navigator.clipboard.writeText(roomCode);
+    alert("Room code copied!");
   };
 
-  // --- LOBBY VIEW ---
+  const isPlaying = gameState === GameState.PLAYING || gameState === GameState.OPPONENT_LOCKED;
+
   if (gameState === GameState.LOBBY) {
     return (
-      <div className="min-h-screen flex items-center justify-center p-6 animate-float">
-        <div className="glass-panel w-full max-w-lg rounded-3xl p-8 md:p-12 relative overflow-hidden">
-          {/* Decorative glow */}
+      <div className="min-h-screen flex items-center justify-center p-6 bg-grid">
+        <div className="card-glass w-full max-w-lg rounded-3xl p-8 md:p-12 relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-violet-500/20 rounded-full blur-[80px] -translate-y-1/2 translate-x-1/2"></div>
           
           <div className="text-center mb-10 relative z-10">
-            <h1 className="text-5xl md:text-6xl font-black italic tracking-tighter bg-gradient-to-r from-violet-400 via-fuchsia-400 to-white bg-clip-text text-transparent drop-shadow-[0_0_30px_rgba(167,139,250,0.5)] mb-4">
+            <h1 className="text-5xl md:text-6xl font-black italic tracking-tighter text-gradient mb-4">
               ROSHAMBO
               <span className="block text-3xl md:text-4xl text-white font-thin tracking-[0.3em] not-italic mt-2">LIVE</span>
             </h1>
@@ -198,19 +256,18 @@ export default function App() {
           </div>
 
           <div className="space-y-8 relative z-10">
-            {/* Host Section */}
             <div className="bg-black/40 p-5 rounded-2xl border border-white/5">
               <label className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest flex items-center gap-2 mb-3">
-                 <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse"></div>
-                 Your Game ID
+                <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse"></div>
+                Your Room Code
               </label>
               <div className="flex items-center gap-2">
-                <div className="flex-1 bg-black/60 p-3 rounded-lg border border-white/10 font-mono text-slate-300 text-sm overflow-hidden text-ellipsis whitespace-nowrap">
-                  {peerId || 'INITIALIZING UPLINK...'}
+                <div className="flex-1 bg-black/60 p-4 rounded-lg border border-white/10 font-mono text-2xl text-center tracking-[0.3em] text-white">
+                  {roomCode || '......'}
                 </div>
                 <button 
                   onClick={copyToClipboard}
-                  disabled={!peerId}
+                  disabled={!roomCode}
                   className="p-3 bg-slate-800 hover:bg-slate-700 rounded-lg text-white transition-colors border border-slate-700"
                 >
                   <Copy size={18} />
@@ -219,28 +276,28 @@ export default function App() {
             </div>
 
             <div className="flex items-center gap-4">
-               <div className="h-px bg-gradient-to-r from-transparent via-slate-600 to-transparent flex-1"></div>
-               <span className="text-slate-500 font-mono text-xs">VS</span>
-               <div className="h-px bg-gradient-to-r from-transparent via-slate-600 to-transparent flex-1"></div>
+              <div className="h-px bg-gradient-to-r from-transparent via-slate-600 to-transparent flex-1"></div>
+              <span className="text-slate-500 font-mono text-xs">VS</span>
+              <div className="h-px bg-gradient-to-r from-transparent via-slate-600 to-transparent flex-1"></div>
             </div>
 
-            {/* Join Section */}
             <div>
               <label className="text-[10px] text-cyan-400 font-bold uppercase tracking-widest mb-3 block">
-                 Join Rival
+                Join Rival
               </label>
               <div className="flex gap-3">
                 <input
                   type="text"
-                  placeholder="Paste Room ID..."
-                  value={targetPeerId}
-                  onChange={(e) => setTargetPeerId(e.target.value)}
-                  className="flex-1 bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 placeholder-slate-600 font-mono text-sm transition-all"
+                  placeholder="Enter 6-char code..."
+                  value={targetRoomCode}
+                  onChange={(e) => setTargetRoomCode(e.target.value.toUpperCase().slice(0, 6))}
+                  maxLength={6}
+                  className="flex-1 bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-3 text-white text-center text-xl font-mono tracking-[0.3em] uppercase focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 placeholder-slate-600 transition-all"
                 />
                 <button 
                   onClick={joinGame}
-                  disabled={!targetPeerId}
-                  className="bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 disabled:opacity-50 disabled:grayscale text-white px-6 rounded-xl font-bold tracking-wide transition-all shadow-lg shadow-cyan-900/20"
+                  disabled={targetRoomCode.length !== 6}
+                  className="btn-primary disabled:opacity-50 disabled:grayscale text-white px-6 rounded-xl font-bold tracking-wide transition-all"
                 >
                   FIGHT
                 </button>
@@ -248,10 +305,10 @@ export default function App() {
             </div>
             
             <div className="flex justify-center mt-6">
-                <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 flex items-center gap-2 text-[10px] text-slate-400">
-                    <Users size={12} />
-                    <span>2 PLAYER P2P CONNECTION</span>
-                </div>
+              <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 flex items-center gap-2 text-[10px] text-slate-400">
+                <Users size={12} />
+                <span>2 PLAYER P2P CONNECTION</span>
+              </div>
             </div>
           </div>
         </div>
@@ -259,117 +316,119 @@ export default function App() {
     );
   }
 
-  // --- GAME VIEW ---
-  const isPlaying = gameState === GameState.PLAYING || gameState === GameState.OPPONENT_LOCKED;
-  const isOpponentReady = gameState === GameState.OPPONENT_LOCKED || gameState === GameState.BOTH_LOCKED || gameState === GameState.REVEAL;
-
   return (
-    <div className="min-h-screen flex flex-col text-slate-200">
-      
-      {/* HEADER HUD */}
-      <header className="fixed top-6 left-1/2 -translate-x-1/2 z-50 glass-panel rounded-full px-8 py-3 flex items-center gap-8 shadow-2xl">
+    <div className="min-h-screen flex flex-col text-slate-200 bg-grid">
+      <header className="fixed top-6 left-1/2 -translate-x-1/2 z-50 card-glass rounded-full px-8 py-3 flex items-center gap-8">
         <div className="flex flex-col items-center">
-             <span className="text-[10px] text-cyan-400 font-bold uppercase tracking-widest mb-1">YOU</span>
-             <span className="text-3xl font-black font-mono leading-none text-white drop-shadow-[0_0_10px_rgba(34,211,238,0.5)]">{score.me}</span>
+          <span className="text-[10px] text-cyan-400 font-bold uppercase tracking-widest mb-1">YOU</span>
+          <span className="text-3xl font-black font-mono leading-none text-white">{score.me}</span>
         </div>
         
         <div className="w-px h-8 bg-slate-700"></div>
         
         <div className="flex items-center gap-2 text-violet-400">
-             <Trophy size={16} />
+          <Trophy size={16} />
         </div>
 
         <div className="w-px h-8 bg-slate-700"></div>
 
         <div className="flex flex-col items-center">
-             <span className="text-[10px] text-red-400 font-bold uppercase tracking-widest mb-1">RIVAL</span>
-             <span className="text-3xl font-black font-mono leading-none text-white drop-shadow-[0_0_10px_rgba(248,113,113,0.5)]">{score.opponent}</span>
+          <span className="text-[10px] text-red-400 font-bold uppercase tracking-widest mb-1">RIVAL</span>
+          <span className="text-3xl font-black font-mono leading-none text-white">{score.opponent}</span>
+        </div>
+
+        <div className="w-px h-8 bg-slate-700"></div>
+
+        <div className={`flex flex-col items-center ${timer <= 5 ? 'text-red-500 animate-pulse' : 'text-yellow-400'}`}>
+          <Clock size={16} />
+          <span className="text-xl font-black font-mono">{timer}s</span>
         </div>
       </header>
 
-      {/* GAME ARENA */}
       <main className="flex-1 flex flex-col md:flex-row items-center justify-center gap-4 md:gap-12 p-6 pt-24 pb-32">
-        
-        {/* MY MACHINE */}
         <div className={`transition-all duration-500 ${gameResult === 'WIN' ? 'scale-110 z-10' : gameResult === 'LOSE' ? 'scale-90 opacity-60 grayscale-[0.5]' : ''}`}>
-           <SlotMachine 
+          <SlotMachine 
             label="PLAYER 1 (YOU)"
             isSpinning={isPlaying}
             onSelect={handleMySelect}
             finalMove={myMove}
             disabled={!isPlaying}
+            hasSelected={!!myMove}
           />
         </div>
 
-        {/* VS CENTER */}
         <div className="relative z-20 flex flex-col items-center justify-center min-w-[120px]">
-            {gameResult ? (
-               <div className="text-center animate-[bounce_1s_infinite]">
-                  <div className={`
-                    text-5xl md:text-7xl font-black italic uppercase tracking-tighter drop-shadow-2xl
-                    ${gameResult === 'WIN' ? 'text-emerald-400 drop-shadow-[0_0_25px_rgba(52,211,153,0.6)]' : 
-                      gameResult === 'LOSE' ? 'text-red-500 drop-shadow-[0_0_25px_rgba(239,68,68,0.6)]' : 
-                      'text-yellow-400 drop-shadow-[0_0_25px_rgba(250,204,21,0.6)]'}
-                  `}>
-                    {gameResult === 'WIN' ? 'VICTORY' : gameResult === 'LOSE' ? 'DEFEAT' : 'DRAW'}
-                  </div>
-                  <button 
-                    onClick={handlePlayAgain}
-                    className="mt-8 px-8 py-3 rounded-full bg-white text-black font-bold flex items-center gap-2 mx-auto hover:scale-105 transition-transform shadow-[0_0_20px_rgba(255,255,255,0.4)]"
-                  >
-                    <Play size={18} fill="black" />
-                    REMATCH
-                  </button>
-               </div>
-            ) : (
-                <div className="relative">
-                   <div className="absolute inset-0 bg-violet-500 blur-[40px] opacity-20 animate-pulse"></div>
-                   <div className="text-6xl font-black italic text-slate-800 -skew-x-12 select-none opacity-50">VS</div>
-                </div>
-            )}
+          {gameResult ? (
+            <div className="text-center winner-glow">
+              <div className={`
+                text-5xl md:text-7xl font-black italic uppercase tracking-tighter
+                ${gameResult === 'WIN' ? 'text-emerald-400 drop-shadow-[0_0_25px_rgba(52,211,153,0.6)]' : 
+                  gameResult === 'LOSE' ? 'text-red-500 drop-shadow-[0_0_25px_rgba(239,68,68,0.6)]' : 
+                  'text-yellow-400 drop-shadow-[0_0_25px_rgba(250,204,21,0.6)]'}
+              `}>
+                {gameResult === 'WIN' ? 'VICTORY' : gameResult === 'LOSE' ? 'DEFEAT' : 'DRAW'}
+              </div>
+              <button 
+                onClick={handlePlayAgain}
+                className="mt-8 px-8 py-3 rounded-full bg-white text-black font-bold flex items-center gap-2 mx-auto hover:scale-105 transition-transform shadow-[0_0_20px_rgba(255,255,255,0.4)]"
+              >
+                <Play size={18} fill="black" />
+                REMATCH
+              </button>
+            </div>
+          ) : (
+            <div className="relative">
+              <div className="absolute inset-0 bg-violet-500 blur-[40px] opacity-20 animate-pulse"></div>
+              <div className="text-6xl font-black italic text-slate-800 -skew-x-12 select-none opacity-50">VS</div>
+            </div>
+          )}
         </div>
 
-        {/* OPPONENT MACHINE */}
         <div className={`transition-all duration-500 ${gameResult === 'LOSE' ? 'scale-110 z-10' : gameResult === 'WIN' ? 'scale-90 opacity-60 grayscale-[0.5]' : ''}`}>
-           <SlotMachine 
+          <SlotMachine 
             label="PLAYER 2 (RIVAL)"
             isSpinning={false}
             onSelect={() => {}}
-            finalMove={opponentMove} // This is null until REVEAL
+            finalMove={opponentMove}
             disabled={true}
             isOpponent={true}
+            hasSelected={opponentHasSelected}
           />
         </div>
-
       </main>
 
-      {/* COMMENTARY TERMINAL */}
       <footer className="fixed bottom-0 left-0 right-0 p-6 flex justify-center z-40">
         <div className="w-full max-w-2xl bg-black/80 backdrop-blur-md border border-violet-500/30 rounded-t-2xl p-1 shadow-2xl">
-           <div className="bg-slate-900/90 rounded-t-xl p-4 min-h-[100px] flex flex-col relative overflow-hidden">
-               <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-violet-500 via-fuchsia-500 to-violet-500"></div>
-               <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <Zap size={14} className="text-yellow-400 fill-yellow-400" />
-                    <span className="text-[10px] text-slate-400 font-mono uppercase tracking-wider">AI_ANNOUNCER_V3.0</span>
-                  </div>
-                  <div className="flex gap-1">
-                     <div className="w-2 h-2 rounded-full bg-red-500/50"></div>
-                     <div className="w-2 h-2 rounded-full bg-yellow-500/50"></div>
-                     <div className="w-2 h-2 rounded-full bg-green-500/50"></div>
-                  </div>
-               </div>
-               
-               <div className="flex-1 flex items-center justify-center">
-                 {isProcessingAI ? (
-                    <div className="font-mono text-violet-400 text-sm animate-pulse">ANALYZING MATCH DATA...</div>
-                 ) : (
-                    <p className="font-mono text-lg md:text-xl text-white text-center leading-relaxed">
-                       {commentary ? `"${commentary}"` : <span className="text-slate-600 italic opacity-50">Waiting for battle results...</span>}
-                    </p>
-                 )}
-               </div>
-           </div>
+          <div className="bg-slate-900/90 rounded-t-xl p-4 min-h-[100px] flex flex-col relative overflow-hidden">
+            <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-violet-500 via-fuchsia-500 to-violet-500"></div>
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Zap size={14} className="text-yellow-400 fill-yellow-400" />
+                <span className="text-[10px] text-slate-400 font-mono uppercase tracking-wider">AI ANNOUNCER</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <CheckCircle size={12} className={myMove ? 'text-emerald-400' : 'text-slate-600'} />
+                <span className="text-[10px] text-slate-500 font-mono">YOU</span>
+                <div className="w-3"></div>
+                {opponentHasSelected ? (
+                  <CheckCircle size={12} className="text-emerald-400" />
+                ) : (
+                  <Circle size={12} className="text-slate-600" />
+                )}
+                <span className="text-[10px] text-slate-500 font-mono">RIVAL</span>
+              </div>
+            </div>
+            
+            <div className="flex-1 flex items-center justify-center">
+              {isProcessingAI ? (
+                <div className="font-mono text-violet-400 text-sm animate-pulse">ANALYZING MATCH DATA...</div>
+              ) : (
+                <p className="font-mono text-lg md:text-xl text-white text-center leading-relaxed">
+                  {commentary ? `"${commentary}"` : <span className="text-slate-600 italic opacity-50">Waiting for battle results...</span>}
+                </p>
+              )}
+            </div>
+          </div>
         </div>
       </footer>
     </div>

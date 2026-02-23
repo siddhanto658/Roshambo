@@ -9,6 +9,7 @@ interface SlotMachineProps {
   disabled: boolean;
   label?: string;
   isOpponent?: boolean;
+  hasSelected?: boolean;
 }
 
 export const SlotMachine: React.FC<SlotMachineProps> = ({ 
@@ -17,7 +18,8 @@ export const SlotMachine: React.FC<SlotMachineProps> = ({
   finalMove, 
   disabled,
   label,
-  isOpponent = false
+  isOpponent = false,
+  hasSelected = false
 }) => {
   const [currentIcon, setCurrentIcon] = useState<Move>(Move.ROCK);
   const moves = [Move.ROCK, Move.PAPER, Move.SCISSORS];
@@ -93,16 +95,19 @@ export const SlotMachine: React.FC<SlotMachineProps> = ({
       {/* Controls Area */}
       <div className="h-24 flex items-center justify-center w-full mt-6">
         {isOpponent ? (
-             <div className="flex flex-col items-center gap-2">
-                {finalMove ? (
-                  <div className="px-4 py-2 bg-slate-800 rounded border border-slate-600 text-slate-400 text-sm font-mono flex items-center gap-2">
-                    <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></span>
-                    READY
-                  </div>
-                ) : (
-                  <div className="text-slate-600 font-mono text-sm animate-pulse">WAITING FOR PLAYER...</div>
-                )}
-             </div>
+          <div className="flex flex-col items-center gap-2">
+            {hasSelected || finalMove ? (
+              <div className="px-4 py-2 bg-emerald-900/50 rounded border border-emerald-600 text-emerald-400 text-sm font-mono flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                LOCKED IN
+              </div>
+            ) : (
+              <div className="px-4 py-2 bg-slate-800 rounded border border-slate-600 text-slate-400 text-sm font-mono flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-slate-500 animate-pulse"></span>
+                SELECTING...
+              </div>
+            )}
+          </div>
         ) : (
           <>
             {isSpinning && !finalMove ? (
