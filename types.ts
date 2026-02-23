@@ -23,7 +23,7 @@ export enum PlayerRole {
 }
 
 export interface PeerMessage {
-  type: 'CONNECT' | 'MOVE_COMMITTED' | 'REVEAL_MOVE' | 'PLAY_AGAIN';
+  type: 'CONNECT' | 'MOVE_COMMITTED' | 'REVEAL_MOVE' | 'PLAY_AGAIN' | 'OPPONENT_NAME';
   payload?: any;
 }
 

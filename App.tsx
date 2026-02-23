@@ -2,9 +2,17 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { GameState, Move, PeerMessage, PlayerRole, Score } from './types';
 import { SlotMachine } from './components/SlotMachine';
 import { generateCommentary } from './services/geminiService';
-import { Copy, Users, Play, Trophy, Zap, Clock, CheckCircle, Circle } from 'lucide-react';
+import { Copy, Users, Play, Trophy, Zap, Clock, CheckCircle, Circle, Bot, Shuffle, Edit2, Check, X, ArrowLeft } from 'lucide-react';
 
 declare const Peer: any;
+
+type GameMode = 'PRIVATE' | 'RANDOM' | 'AI';
+
+const VEGETABLE_NAMES = [
+  'Carrot', 'Broccoli', 'Potato', 'Tomato', 'Onion', 'Celery', 'Cabbage', 'Lettuce',
+  'Pepper', 'Cucumber', 'Radish', 'Beet', 'Turnip', 'Parsnip', 'Squash', 'Zucchini',
+  'Eggplant', 'Spinach', 'Kale', 'Chard', 'Asparagus', 'Corn', 'Pea', 'Bean'
+];
 
 const generateRoomCode = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -15,12 +23,20 @@ const generateRoomCode = () => {
   return code;
 };
 
+const getRandomVegetable = () => VEGETABLE_NAMES[Math.floor(Math.random() * VEGETABLE_NAMES.length)];
+
 export default function App() {
   const [peerId, setPeerId] = useState<string>('');
   const [roomCode, setRoomCode] = useState<string>('');
   const [targetRoomCode, setTargetRoomCode] = useState<string>('');
   const [gameState, setGameState] = useState<GameState>(GameState.LOBBY);
+  const [gameMode, setGameMode] = useState<GameMode>('PRIVATE');
   const [role, setRole] = useState<PlayerRole | null>(null);
+  
+  const [myName, setMyName] = useState<string>('');
+  const [opponentName, setOpponentName] = useState<string>('Rival');
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [tempName, setTempName] = useState('');
   
   const [myMove, setMyMove] = useState<Move | null>(null);
   const [opponentMove, setOpponentMove] = useState<Move | null>(null);
@@ -30,10 +46,12 @@ export default function App() {
   const [isProcessingAI, setIsProcessingAI] = useState(false);
   const [gameResult, setGameResult] = useState<'WIN' | 'LOSE' | 'DRAW' | null>(null);
   const [timer, setTimer] = useState<number>(20);
+  const [isSearching, setIsSearching] = useState(false);
 
   const peerRef = useRef<any>(null);
   const connRef = useRef<any>(null);
   const timerRef = useRef<number | null>(null);
+  const matchmakingPeerRef = useRef<any>(null);
 
   const startTimer = useCallback(() => {
     setTimer(20);
@@ -55,6 +73,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const vegName = getRandomVegetable();
+    setMyName(vegName);
     const code = generateRoomCode();
     setRoomCode(code);
     const newPeer = new Peer(`roshambo-${code}`);
@@ -64,14 +84,13 @@ export default function App() {
     });
 
     newPeer.on('connection', (conn: any) => {
-      connRef.current = conn;
-      setupConnectionHandlers(conn);
-      setRole(PlayerRole.HOST);
-      setGameState(GameState.PLAYING);
-      setMyMove(null);
-      setOpponentMove(null);
-      setOpponentHasSelected(false);
-      startTimer();
+      if (gameMode === 'RANDOM' || gameMode === 'PRIVATE') {
+        connRef.current = conn;
+        setupConnectionHandlers(conn);
+        setRole(PlayerRole.HOST);
+        setGameState(GameState.PLAYING);
+        startGame();
+      }
     });
 
     peerRef.current = newPeer;
@@ -79,26 +98,49 @@ export default function App() {
     return () => {
       newPeer.destroy();
       stopTimer();
+      if (matchmakingPeerRef.current) {
+        matchmakingPeerRef.current.destroy();
+      }
     };
-  }, [startTimer, stopTimer]);
+  }, [gameMode]);
+
+  const startGame = () => {
+    setMyMove(null);
+    setOpponentMove(null);
+    setOpponentHasSelected(false);
+    setScore({ me: 0, opponent: 0 });
+    setGameResult(null);
+    setCommentary('');
+    setGameState(GameState.PLAYING);
+    startTimer();
+  };
 
   const setupConnectionHandlers = (conn: any) => {
     conn.on('data', (data: PeerMessage) => {
+      if (data.type === 'OPPONENT_NAME') {
+        setOpponentName(data.payload);
+      }
       handleData(data);
     });
 
     conn.on('open', () => {
-      console.log('Connected to peer');
+      if (connRef.current) {
+        connRef.current.send({ type: 'OPPONENT_NAME', payload: myName });
+      }
     });
     
     conn.on('close', () => {
-      alert('Opponent disconnected');
-      resetGame();
+      if (gameMode !== 'AI') {
+        alert('Opponent disconnected');
+        resetGame();
+      }
     });
     
     conn.on('error', () => {
-      alert('Connection error');
-      resetGame();
+      if (gameMode !== 'AI') {
+        alert('Connection error');
+        resetGame();
+      }
     });
   };
 
@@ -111,7 +153,9 @@ export default function App() {
     setScore({ me: 0, opponent: 0 });
     setGameResult(null);
     setCommentary('');
+    setOpponentName(gameMode === 'AI' ? 'Bot' : 'Rival');
     stopTimer();
+    setIsSearching(false);
   };
 
   const joinGame = () => {
@@ -121,10 +165,39 @@ export default function App() {
     setupConnectionHandlers(conn);
     setRole(PlayerRole.GUEST);
     setGameState(GameState.PLAYING);
-    setMyMove(null);
-    setOpponentMove(null);
-    setOpponentHasSelected(false);
-    startTimer();
+    startGame();
+  };
+
+  const startRandomMatchmaking = () => {
+    setIsSearching(true);
+    const matchPeer = new Peer('roshambo-matchmaking');
+    matchmakingPeerRef.current = matchPeer;
+
+    matchPeer.on('open', () => {
+      matchPeer.listAllPeers((peers: string[]) => {
+        const availableHosts = peers.filter(p => p.startsWith('roshambo-') && !p.includes('matchmaking'));
+        if (availableHosts.length > 0) {
+          const randomHost = availableHosts[Math.floor(Math.random() * availableHosts.length)];
+          const conn = matchPeer.connect(randomHost);
+          connRef.current = conn;
+          setupConnectionHandlers(conn);
+          setRole(PlayerRole.GUEST);
+          setGameState(GameState.PLAYING);
+          setIsSearching(false);
+          startGame();
+        } else {
+          alert('No players available. Try again or start a private game!');
+          setIsSearching(false);
+        }
+      });
+    });
+  };
+
+  const startAIMode = () => {
+    setGameMode('AI');
+    setOpponentName('Bot');
+    setGameState(GameState.PLAYING);
+    startGame();
   };
 
   const handleData = (data: PeerMessage) => {
@@ -158,15 +231,21 @@ export default function App() {
 
   useEffect(() => {
     if (gameState === GameState.BOTH_LOCKED) {
-      if (connRef.current && myMove) {
+      if (gameMode === 'AI') {
+        const moves = [Move.ROCK, Move.PAPER, Move.SCISSORS];
+        const aiMove = moves[Math.floor(Math.random() * moves.length)];
+        setOpponentMove(aiMove);
+        setGameState(GameState.REVEAL);
+        stopTimer();
+      } else if (connRef.current && myMove) {
         connRef.current.send({
           type: 'REVEAL_MOVE',
           payload: myMove
         });
+        stopTimer();
       }
-      stopTimer();
     }
-  }, [gameState, myMove, stopTimer]);
+  }, [gameState, myMove, gameMode]);
 
   useEffect(() => {
     if (gameState === GameState.REVEAL && myMove && opponentMove) {
@@ -217,6 +296,9 @@ export default function App() {
     }
     setGameState(prev => {
       if (prev === GameState.OPPONENT_LOCKED) return GameState.BOTH_LOCKED;
+      if (gameMode === 'AI' && prev === GameState.PLAYING) {
+        return GameState.BOTH_LOCKED;
+      }
       return GameState.LOCKED;
     });
   };
@@ -231,12 +313,27 @@ export default function App() {
     if (connRef.current) {
       connRef.current.send({ type: 'PLAY_AGAIN' });
     }
+    if (gameMode === 'AI') {
+      setOpponentName('Bot');
+    }
     startTimer();
   };
 
   const copyToClipboard = () => {
     navigator.clipboard.writeText(roomCode);
     alert("Room code copied!");
+  };
+
+  const saveName = () => {
+    if (tempName.trim()) {
+      setMyName(tempName.trim());
+    }
+    setIsEditingName(false);
+  };
+
+  const cancelEdit = () => {
+    setTempName(myName);
+    setIsEditingName(false);
   };
 
   const isPlaying = gameState === GameState.PLAYING || gameState === GameState.OPPONENT_LOCKED;
@@ -247,7 +344,7 @@ export default function App() {
         <div className="card-glass w-full max-w-lg rounded-3xl p-8 md:p-12 relative overflow-hidden">
           <div className="absolute top-0 right-0 w-64 h-64 bg-violet-500/20 rounded-full blur-[80px] -translate-y-1/2 translate-x-1/2"></div>
           
-          <div className="text-center mb-10 relative z-10">
+          <div className="text-center mb-6 relative z-10">
             <h1 className="text-5xl md:text-6xl font-black italic tracking-tighter text-gradient mb-4">
               ROSHAMBO
               <span className="block text-3xl md:text-4xl text-white font-thin tracking-[0.3em] not-italic mt-2">LIVE</span>
@@ -255,14 +352,40 @@ export default function App() {
             <p className="text-slate-400 font-mono text-sm">MULTIPLAYER ARCADE BATTLE</p>
           </div>
 
-          <div className="space-y-8 relative z-10">
-            <div className="bg-black/40 p-5 rounded-2xl border border-white/5">
-              <label className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest flex items-center gap-2 mb-3">
-                <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse"></div>
-                Your Room Code
+          <div className="flex justify-center mb-6">
+            <div className="flex items-center gap-2 bg-black/40 px-4 py-2 rounded-full border border-white/10">
+              {isEditingName ? (
+                <>
+                  <input
+                    type="text"
+                    value={tempName}
+                    onChange={(e) => setTempName(e.target.value.slice(0, 12))}
+                    maxLength={12}
+                    className="bg-transparent text-white text-center font-bold w-28 focus:outline-none"
+                    autoFocus
+                  />
+                  <button onClick={saveName} className="text-emerald-400"><Check size={16} /></button>
+                  <button onClick={cancelEdit} className="text-red-400"><X size={16} /></button>
+                </>
+              ) : (
+                <>
+                  <span className="text-white font-bold">{myName}</span>
+                  <button onClick={() => { setTempName(myName); setIsEditingName(true); }} className="text-slate-400 hover:text-white">
+                    <Edit2 size={14} />
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          <div className="space-y-4 relative z-10">
+            <div className="bg-black/40 p-4 rounded-2xl border border-white/5">
+              <label className="text-[10px] text-violet-400 font-bold uppercase tracking-widest flex items-center gap-2 mb-3">
+                <div className="w-1.5 h-1.5 bg-violet-400 rounded-full animate-pulse"></div>
+                Private Room
               </label>
               <div className="flex items-center gap-2">
-                <div className="flex-1 bg-black/60 p-4 rounded-lg border border-white/10 font-mono text-2xl text-center tracking-[0.3em] text-white">
+                <div className="flex-1 bg-black/60 p-3 rounded-lg border border-white/10 font-mono text-xl text-center tracking-[0.3em] text-white">
                   {roomCode || '......'}
                 </div>
                 <button 
@@ -275,41 +398,46 @@ export default function App() {
               </div>
             </div>
 
+            <div className="flex gap-3">
+              <input
+                type="text"
+                placeholder="Enter code..."
+                value={targetRoomCode}
+                onChange={(e) => setTargetRoomCode(e.target.value.toUpperCase().slice(0, 6))}
+                maxLength={6}
+                className="flex-1 bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-3 text-white text-center text-lg font-mono tracking-[0.3em] uppercase focus:outline-none focus:ring-2 focus:ring-violet-500/50 focus:border-violet-500 placeholder-slate-600"
+              />
+              <button 
+                onClick={joinGame}
+                disabled={targetRoomCode.length !== 6}
+                className="btn-primary disabled:opacity-50 text-white px-5 rounded-xl font-bold"
+              >
+                JOIN
+              </button>
+            </div>
+
             <div className="flex items-center gap-4">
               <div className="h-px bg-gradient-to-r from-transparent via-slate-600 to-transparent flex-1"></div>
-              <span className="text-slate-500 font-mono text-xs">VS</span>
+              <span className="text-slate-500 font-mono text-xs">OR</span>
               <div className="h-px bg-gradient-to-r from-transparent via-slate-600 to-transparent flex-1"></div>
             </div>
 
-            <div>
-              <label className="text-[10px] text-cyan-400 font-bold uppercase tracking-widest mb-3 block">
-                Join Rival
-              </label>
-              <div className="flex gap-3">
-                <input
-                  type="text"
-                  placeholder="Enter 6-char code..."
-                  value={targetRoomCode}
-                  onChange={(e) => setTargetRoomCode(e.target.value.toUpperCase().slice(0, 6))}
-                  maxLength={6}
-                  className="flex-1 bg-slate-900/80 border border-slate-700 rounded-xl px-4 py-3 text-white text-center text-xl font-mono tracking-[0.3em] uppercase focus:outline-none focus:ring-2 focus:ring-cyan-500/50 focus:border-cyan-500 placeholder-slate-600 transition-all"
-                />
-                <button 
-                  onClick={joinGame}
-                  disabled={targetRoomCode.length !== 6}
-                  className="btn-primary disabled:opacity-50 disabled:grayscale text-white px-6 rounded-xl font-bold tracking-wide transition-all"
-                >
-                  FIGHT
-                </button>
-              </div>
-            </div>
-            
-            <div className="flex justify-center mt-6">
-              <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 flex items-center gap-2 text-[10px] text-slate-400">
-                <Users size={12} />
-                <span>2 PLAYER P2P CONNECTION</span>
-              </div>
-            </div>
+            <button
+              onClick={startRandomMatchmaking}
+              disabled={isSearching}
+              className="w-full py-4 rounded-xl bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 disabled:opacity-50 font-bold text-white flex items-center justify-center gap-2 transition-all"
+            >
+              <Shuffle size={20} />
+              {isSearching ? 'SEARCHING...' : 'RANDOM MATCH'}
+            </button>
+
+            <button
+              onClick={startAIMode}
+              className="w-full py-4 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 font-bold text-white flex items-center justify-center gap-2 transition-all"
+            >
+              <Bot size={20} />
+              PLAY VS AI
+            </button>
           </div>
         </div>
       </div>
@@ -318,10 +446,10 @@ export default function App() {
 
   return (
     <div className="min-h-screen flex flex-col text-slate-200 bg-grid">
-      <header className="fixed top-6 left-1/2 -translate-x-1/2 z-50 card-glass rounded-full px-8 py-3 flex items-center gap-8">
+      <header className="fixed top-6 left-1/2 -translate-x-1/2 z-50 card-glass rounded-full px-6 py-2 flex items-center gap-6">
         <div className="flex flex-col items-center">
           <span className="text-[10px] text-cyan-400 font-bold uppercase tracking-widest mb-1">YOU</span>
-          <span className="text-3xl font-black font-mono leading-none text-white">{score.me}</span>
+          <span className="text-2xl font-black font-mono leading-none text-white">{score.me}</span>
         </div>
         
         <div className="w-px h-8 bg-slate-700"></div>
@@ -333,22 +461,34 @@ export default function App() {
         <div className="w-px h-8 bg-slate-700"></div>
 
         <div className="flex flex-col items-center">
-          <span className="text-[10px] text-red-400 font-bold uppercase tracking-widest mb-1">RIVAL</span>
-          <span className="text-3xl font-black font-mono leading-none text-white">{score.opponent}</span>
+          <span className="text-[10px] text-red-400 font-bold uppercase tracking-widest mb-1">{opponentName.toUpperCase()}</span>
+          <span className="text-2xl font-black font-mono leading-none text-white">{score.opponent}</span>
         </div>
 
         <div className="w-px h-8 bg-slate-700"></div>
 
         <div className={`flex flex-col items-center ${timer <= 5 ? 'text-red-500 animate-pulse' : 'text-yellow-400'}`}>
-          <Clock size={16} />
-          <span className="text-xl font-black font-mono">{timer}s</span>
+          <Clock size={14} />
+          <span className="text-lg font-black font-mono">{timer}s</span>
         </div>
+
+        {gameMode !== 'AI' && (
+          <>
+            <div className="w-px h-8 bg-slate-700"></div>
+            <button
+              onClick={resetGame}
+              className="text-slate-400 hover:text-white"
+            >
+              <ArrowLeft size={18} />
+            </button>
+          </>
+        )}
       </header>
 
       <main className="flex-1 flex flex-col md:flex-row items-center justify-center gap-4 md:gap-12 p-6 pt-24 pb-32">
         <div className={`transition-all duration-500 ${gameResult === 'WIN' ? 'scale-110 z-10' : gameResult === 'LOSE' ? 'scale-90 opacity-60 grayscale-[0.5]' : ''}`}>
           <SlotMachine 
-            label="PLAYER 1 (YOU)"
+            label={myName.toUpperCase()}
             isSpinning={isPlaying}
             onSelect={handleMySelect}
             finalMove={myMove}
@@ -386,13 +526,13 @@ export default function App() {
 
         <div className={`transition-all duration-500 ${gameResult === 'LOSE' ? 'scale-110 z-10' : gameResult === 'WIN' ? 'scale-90 opacity-60 grayscale-[0.5]' : ''}`}>
           <SlotMachine 
-            label="PLAYER 2 (RIVAL)"
+            label={gameMode === 'AI' ? 'BOT' : opponentName.toUpperCase()}
             isSpinning={false}
             onSelect={() => {}}
             finalMove={opponentMove}
             disabled={true}
             isOpponent={true}
-            hasSelected={opponentHasSelected}
+            hasSelected={opponentHasSelected || (gameMode === 'AI' && gameState === GameState.BOTH_LOCKED)}
           />
         </div>
       </main>
@@ -408,14 +548,14 @@ export default function App() {
               </div>
               <div className="flex items-center gap-1">
                 <CheckCircle size={12} className={myMove ? 'text-emerald-400' : 'text-slate-600'} />
-                <span className="text-[10px] text-slate-500 font-mono">YOU</span>
+                <span className="text-[10px] text-slate-500 font-mono">{myName.toUpperCase().slice(0, 6)}</span>
                 <div className="w-3"></div>
-                {opponentHasSelected ? (
+                {opponentHasSelected || (gameMode === 'AI' && gameState === GameState.BOTH_LOCKED) ? (
                   <CheckCircle size={12} className="text-emerald-400" />
                 ) : (
                   <Circle size={12} className="text-slate-600" />
                 )}
-                <span className="text-[10px] text-slate-500 font-mono">RIVAL</span>
+                <span className="text-[10px] text-slate-500 font-mono">{gameMode === 'AI' ? 'BOT' : opponentName.toUpperCase().slice(0, 6)}</span>
               </div>
             </div>
             
